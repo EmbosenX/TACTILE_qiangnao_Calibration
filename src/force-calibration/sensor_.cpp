@@ -285,49 +285,6 @@ QWidget *SensorWidget::create_device_info_group()
     sensor_modify_id_spinbox_->setMinimumWidth(120);
     sensor_modify_id_button_ = new QPushButton("修改", grid_host);
 
-    calibration_status_label_ = new QLabel("未查询", grid_host);
-    calibration_status_label_->setObjectName("statusUnknown");
-    calibration_status_label_->setMinimumWidth(440);
-    calibration_status_label_->setTextInteractionFlags(Qt::TextSelectableByMouse |
-                                                       Qt::TextSelectableByKeyboard);
-    calibration_query_button_ = new QPushButton("查询", grid_host);
-
-    // 强脑 14 个区域的标定状态：5 根手指 × 指尖/指中/指根，拇指没有指中。
-    // 格子下标与 STATUS_ALL 掩码的位序一致（bit0 拇指指尖 … bit13 小指指根）。
-    region_status_title_ = new QLabel("区域状态：", grid_host);
-    region_status_host_  = new QWidget(grid_host);
-    auto *region_grid    = new QGridLayout(region_status_host_);
-    region_grid->setContentsMargins(0, 0, 0, 0);
-    region_grid->setHorizontalSpacing(12);
-    region_grid->setVerticalSpacing(4);
-    const QStringList finger_names{ "拇指", "食指", "中指", "无名指", "小指" };
-    const QStringList region_names{ "指尖", "指中", "指根" };
-    for (int col = 0; col < region_names.size(); ++col) {
-        region_grid->addWidget(new QLabel(region_names.at(col), region_status_host_), 0, col + 1,
-                               Qt::AlignCenter);
-    }
-    size_t bit = 0U;
-    for (int finger = 0; finger < finger_names.size(); ++finger) {
-        region_grid->addWidget(new QLabel(finger_names.at(finger), region_status_host_), finger + 1, 0);
-        // 拇指只有协议区域 1（指尖）和 2（指根），指根放在第 3 列与其它手指对齐。
-        const QVector<int> columns = finger == 0 ? QVector<int>{ 0, 2 } : QVector<int>{ 0, 1, 2 };
-        for (int col : columns) {
-            auto *cell = new QLabel(region_status_host_);
-            cell->setAlignment(Qt::AlignCenter);
-            cell->setMinimumWidth(64);
-            region_grid->addWidget(cell, finger + 1, col + 1);
-            region_status_cells_[bit++] = cell;
-        }
-    }
-    auto *thumb_middle = new QLabel("—", region_status_host_);
-    thumb_middle->setAlignment(Qt::AlignCenter);
-    thumb_middle->setStyleSheet("color:#6b7280;");
-    region_grid->addWidget(thumb_middle, 1, 2);
-    region_grid->setColumnStretch(4, 1);
-    reset_region_status_cells();
-    region_status_title_->setVisible(false); // 只在强脑型号下显示，见 product_model_changed()
-    region_status_host_->setVisible(false);
-
     grid->addWidget(new QLabel("固件版本：", grid_host), 0, 0);
     grid->addWidget(firmware_version_label_, 0, 1);
 
@@ -342,12 +299,6 @@ QWidget *SensorWidget::create_device_info_group()
     grid->addWidget(sensor_modify_id_spinbox_, 2, 4);
     grid->addWidget(sensor_modify_id_button_, 2, 5);
 
-    grid->addWidget(new QLabel("是否标定：", grid_host), 3, 0);
-    grid->addWidget(calibration_status_label_, 3, 1, 1, 4);
-    grid->addWidget(calibration_query_button_, 3, 5);
-
-    grid->addWidget(region_status_title_, 4, 0, Qt::AlignTop);
-    grid->addWidget(region_status_host_, 4, 1, 1, 5);
     grid->setColumnStretch(6, 1);
 
     layout->addWidget(grid_host);
@@ -447,6 +398,65 @@ QWidget *SensorWidget::create_calibration_test_group(QWidget *parent)
     fs_error_percent_input_->setSuffix(" %FS");
     fs_error_percent_input_->setMinimumWidth(110);
 
+    calibration_status_label_ = new QLabel("未查询", group);
+    calibration_status_label_->setObjectName("statusUnknown");
+    calibration_status_label_->setMinimumWidth(80);
+    calibration_status_label_->setTextInteractionFlags(Qt::TextSelectableByMouse |
+                                                       Qt::TextSelectableByKeyboard);
+    calibration_query_button_ = new QPushButton("查询", group);
+
+    // 强脑 14 个区域的标定状态：5 根手指 × 指尖/指中/指根，拇指没有指中。
+    // 格子下标与 STATUS_ALL 掩码的位序一致（bit0 拇指指尖 … bit13 小指指根）。
+    region_status_title_ = new QLabel("区域状态：", group);
+    region_status_host_  = new QWidget(group);
+    auto *region_grid    = new QGridLayout(region_status_host_);
+    region_grid->setContentsMargins(0, 0, 0, 0);
+    region_grid->setHorizontalSpacing(12);
+    region_grid->setVerticalSpacing(4);
+    const QStringList finger_names{ "拇指", "食指", "中指", "无名指", "小指" };
+    const QStringList region_names{ "指尖", "指中", "指根" };
+    for (int col = 0; col < region_names.size(); ++col) {
+        region_grid->addWidget(new QLabel(region_names.at(col), region_status_host_), 0, col + 1,
+                               Qt::AlignCenter);
+    }
+    size_t bit = 0U;
+    for (int finger = 0; finger < finger_names.size(); ++finger) {
+        region_grid->addWidget(new QLabel(finger_names.at(finger), region_status_host_), finger + 1, 0);
+        // 拇指只有协议区域 1（指尖）和 2（指根），指根放在第 3 列与其它手指对齐。
+        const QVector<int> columns = finger == 0 ? QVector<int>{ 0, 2 } : QVector<int>{ 0, 1, 2 };
+        for (int col : columns) {
+            auto *cell = new QLabel(region_status_host_);
+            cell->setAlignment(Qt::AlignCenter);
+            cell->setMinimumWidth(64);
+            region_grid->addWidget(cell, finger + 1, col + 1);
+            region_status_cells_[bit++] = cell;
+        }
+    }
+    auto *thumb_middle = new QLabel("—", region_status_host_);
+    thumb_middle->setAlignment(Qt::AlignCenter);
+    thumb_middle->setStyleSheet("color:#6b7280;");
+    region_grid->addWidget(thumb_middle, 1, 2);
+    region_grid->setColumnStretch(4, 1);
+    reset_region_status_cells();
+    region_status_title_->setVisible(false); // 只在强脑型号下显示，见 product_model_changed()
+    region_status_host_->setVisible(false);
+
+    auto *calibration_status_panel = new QWidget(group);
+    auto *calibration_status_layout = new QVBoxLayout(calibration_status_panel);
+    calibration_status_layout->setContentsMargins(0, 0, 0, 0);
+    calibration_status_layout->setSpacing(6);
+    auto *calibration_summary_row = new QWidget(calibration_status_panel);
+    auto *calibration_summary_layout = new QHBoxLayout(calibration_summary_row);
+    calibration_summary_layout->setContentsMargins(0, 0, 0, 0);
+    calibration_summary_layout->setSpacing(8);
+    calibration_summary_layout->addWidget(new QLabel("是否标定：", calibration_summary_row));
+    calibration_summary_layout->addWidget(calibration_status_label_, 1);
+    calibration_summary_layout->addWidget(calibration_query_button_);
+    calibration_status_layout->addWidget(calibration_summary_row);
+    calibration_status_layout->addWidget(region_status_title_);
+    calibration_status_layout->addWidget(region_status_host_);
+    calibration_status_layout->addStretch();
+
     // 测试/标定日志显示区域已按需求删除：不再在界面固定区域打印运行日志，
     // 测试结果只写入 CSV，必要提示使用 toast 或弹窗。
     test_result_label_ = nullptr;
@@ -473,7 +483,8 @@ QWidget *SensorWidget::create_calibration_test_group(QWidget *parent)
 
     collected_points_title_ = new QLabel("已采集点位：", group);
     layout->addWidget(collected_points_title_, 4, 0);
-    layout->addWidget(collected_points_label_, 4, 1, 1, 6);
+    layout->addWidget(collected_points_label_, 4, 1, 1, 3);
+    layout->addWidget(calibration_status_panel, 4, 4, 3, 4);
 
     layout->addWidget(new QLabel("误差设置：", group), 5, 0);
     layout->addWidget(error_percent_input_, 5, 1);
@@ -485,7 +496,7 @@ QWidget *SensorWidget::create_calibration_test_group(QWidget *parent)
 
     update_collected_points_ui();
 
-    layout->setColumnStretch(7, 1);
+    layout->setColumnStretch(8, 1);
     return group;
 }
 

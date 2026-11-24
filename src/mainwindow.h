@@ -24,6 +24,7 @@ class QLabel;
 class QSpinBox;
 class QDoubleSpinBox;
 class QPushButton;
+class QComboBox;
 class QCheckBox;
 class TitleBar;
 class QToolBar;
@@ -88,8 +89,10 @@ private:
     QPointer<QAction>  address_{};
     QPointer<QAction>  upgrade_{};
     QPointer<QSpinBox> range_max_{};
-    QPointer<QDoubleSpinBox> pressure_kpa_{};
+    QPointer<QComboBox> ad_table_value_kind_{};
+    QPointer<QDoubleSpinBox> ad_table_value_input_{};
     QPointer<QPushButton> write_ad_table_{};
+    QPointer<QPushButton> capture_ui_button_{};
 
     // status bar
     QPointer<QLabel> pos_label_{};

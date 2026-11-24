@@ -24,15 +24,19 @@
 
 #include <fmt/chrono.h>
 #include <iostream>
+#include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
+#include <QEventLoop>
 #include <QDateTime>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QIcon>
 #include <QLabel>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -704,24 +708,48 @@ void MainWindow::initToolbar()
         range_max_->setToolTip(tr("The maximum value of the device value range"));
         toolbar_->addWidget(range_max_);
 
-        auto* pressure_label = new QLabel(QStringLiteral("压强"));
-        pressure_label->setObjectName("pressure-label");
-        toolbar_->addWidget(pressure_label);
+        ad_table_value_kind_ = new QComboBox();
+        ad_table_value_kind_->addItem(QStringLiteral("压强"), static_cast<int>(AdTableValueKind::PressureKpa));
+        ad_table_value_kind_->addItem(QStringLiteral("砝码重量"),
+                                      static_cast<int>(AdTableValueKind::WeightGram));
+        ad_table_value_kind_->setMinimumWidth(96);
+        ad_table_value_kind_->setObjectName("ad-table-value-kind");
+        toolbar_->addWidget(ad_table_value_kind_);
 
-        pressure_kpa_ = new QDoubleSpinBox();
-        pressure_kpa_->setRange(0.0, 100000.0);
-        pressure_kpa_->setDecimals(2);
-        pressure_kpa_->setSingleStep(1.0);
-        pressure_kpa_->setSuffix(QStringLiteral(" KPa"));
-        pressure_kpa_->setMinimumWidth(140);
-        pressure_kpa_->setObjectName("pressure-kpa");
-        pressure_kpa_->setToolTip(QStringLiteral("写入 AD 表使用的压强，单位 KPa"));
-        toolbar_->addWidget(pressure_kpa_);
+        ad_table_value_input_ = new QDoubleSpinBox();
+        ad_table_value_input_->setRange(0.0, 100000.0);
+        ad_table_value_input_->setDecimals(2);
+        ad_table_value_input_->setSingleStep(1.0);
+        ad_table_value_input_->setSuffix(QStringLiteral(" KPa"));
+        ad_table_value_input_->setMinimumWidth(140);
+        ad_table_value_input_->setObjectName("ad-table-value-input");
+        ad_table_value_input_->setToolTip(QStringLiteral("写入 AD 表使用的压强或砝码重量"));
+        toolbar_->addWidget(ad_table_value_input_);
+
+        const auto syncAdTableValueUi = [this](int index) {
+            if (!ad_table_value_input_) return;
+            const auto kind = static_cast<AdTableValueKind>(ad_table_value_kind_->itemData(index).toInt());
+            ad_table_value_input_->setSuffix(kind == AdTableValueKind::WeightGram ? QStringLiteral(" g")
+                                                                                 : QStringLiteral(" KPa"));
+            ad_table_value_input_->setToolTip(
+                kind == AdTableValueKind::WeightGram
+                    ? QStringLiteral("写入 AD 表使用的砝码重量，单位 g")
+                    : QStringLiteral("写入 AD 表使用的压强，单位 KPa"));
+        };
+        connect(ad_table_value_kind_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                syncAdTableValueUi);
+        syncAdTableValueUi(ad_table_value_kind_->currentIndex());
 
         write_ad_table_ = new QPushButton(QStringLiteral("写表"));
         write_ad_table_->setObjectName("write-ad-table-btn");
-        write_ad_table_->setToolTip(QStringLiteral("把当前数值表中的 AD 值追加写入 AD表 目录下的 CSV"));
+        write_ad_table_->setToolTip(
+            QStringLiteral("把当前数值表 AD 追加写入 AD表 目录；强脑型号按区域1/2/3分块写入"));
         toolbar_->addWidget(write_ad_table_);
+
+        capture_ui_button_ = new QPushButton(QStringLiteral("一键截屏"));
+        capture_ui_button_->setObjectName("capture-ui-btn");
+        capture_ui_button_->setToolTip(QStringLiteral("截取当前软件主界面并保存到 界面截屏 目录"));
+        toolbar_->addWidget(capture_ui_button_);
     }
 
     // connects
@@ -814,11 +842,39 @@ void MainWindow::initToolbar()
 
             const QString file = QDir(dir).filePath(QStringLiteral("AD表.csv"));
             QString error;
-            if (!table->appendDisplayedAdCsv(file, pressure_kpa_->value(), &error)) {
+            const auto kind = static_cast<AdTableValueKind>(
+                ad_table_value_kind_->currentData().toInt());
+            if (!table->appendDisplayedAdCsv(file, kind, ad_table_value_input_->value(), &error)) {
                 Message::warning(this, error.isEmpty() ? QStringLiteral("写入 AD 表失败") : error);
                 return;
             }
-            Message::success(this, QStringLiteral("已写入 %1").arg(file));
+            const QString kind_text = kind == AdTableValueKind::WeightGram ? QStringLiteral("砝码重量")
+                                                                           : QStringLiteral("压强");
+            Message::success(this, QStringLiteral("已按%1写入 %2").arg(kind_text, file));
+        });
+
+        connect(capture_ui_button_, &QPushButton::clicked, [this] {
+            const QString dir =
+                QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("界面截屏"));
+            if (!QDir().mkpath(dir)) {
+                Message::error(this, QStringLiteral("无法创建目录：%1").arg(dir));
+                return;
+            }
+
+            const QString file =
+                QDir(dir).filePath(QStringLiteral("界面截屏_") + QTIMESTAMP + QStringLiteral(".png"));
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            const QPixmap pixmap = grab();
+            if (pixmap.isNull()) {
+                Message::warning(this, QStringLiteral("截屏失败：未获取到有效图像"));
+                return;
+            }
+            if (!pixmap.save(file)) {
+                Message::error(this, QStringLiteral("截屏保存失败：%1").arg(file));
+                return;
+            }
+            Message::success(this, QStringLiteral("界面已保存至 %1").arg(file));
+            logi("UI screenshot saved: {}", file.toStdString());
         });
 
         connect(range_max_, &QSpinBox::valueChanged, [this](int max) {

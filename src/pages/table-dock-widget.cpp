@@ -40,6 +40,68 @@ static void InitializeTableView(QTableView *view, QStandardItemModel *model)
     view->setModel(model);
 }
 
+static void FitBrainCoTableHeight(QTableView *view, int row_count)
+{
+    int height = view->horizontalHeader()->height();
+    for (int row = 0; row < row_count; ++row) height += view->verticalHeader()->sectionSize(row);
+    height += view->frameWidth() * 2;
+    view->setFixedHeight(height);
+}
+
+struct BrainCoRegionSlice
+{
+    int         start;
+    int         rows;
+    const char *name;
+};
+
+static int braincoRegionSlicesForPart(int part, std::array<BrainCoRegionSlice, 3> *slices)
+{
+    if (!slices) return 0;
+    if (part == 1) {
+        *slices = { BrainCoRegionSlice{ 0, 8, "指尖" }, BrainCoRegionSlice{ 8, 3, "指根" },
+                    BrainCoRegionSlice{} };
+        return 2;
+    }
+    if (part >= 2 && part <= 4) {
+        *slices = { BrainCoRegionSlice{ 0, 7, "指尖" }, BrainCoRegionSlice{ 7, 2, "指中" },
+                    BrainCoRegionSlice{ 9, 2, "指根" } };
+        return 3;
+    }
+    if (part == 5) {
+        *slices = { BrainCoRegionSlice{ 0, 6, "指尖" }, BrainCoRegionSlice{ 6, 1, "指中" },
+                    BrainCoRegionSlice{ 7, 2, "指根" } };
+        return 3;
+    }
+    return 0;
+}
+
+static void writeAdMatrixCsvBlock(QTextStream& out, const touch::matrix<uint16_t>& data, int global_row_start,
+                                  int row_count, uint32_t data_id, ProductModel product_type)
+{
+    out << QStringLiteral("行\\列");
+    for (int col = 0; col < data.cols; ++col) out << ',' << col;
+    out << '\n';
+
+    for (int row = 0; row < row_count; ++row) {
+        const int global_row = global_row_start + row;
+        out << global_row;
+        for (int col = 0; col < data.cols; ++col) {
+            out << ',';
+            bool valid = true;
+            if (product_type == ProductModel::BRAINCO_GLOVE_V2 &&
+                Utils::is_brainco_csv_template_size(data.rows, data.cols, data_id)) {
+                valid = Utils::is_valid_cell_by_brainco_csv(global_row, col, data_id);
+            }
+            else if (Utils::is_csv_template_size(data.rows, data.cols, data_id)) {
+                valid = Utils::is_valid_cell_by_csv(global_row, col, data_id);
+            }
+            if (valid) out << data(global_row, col);
+        }
+        out << '\n';
+    }
+}
+
 TableDockWidget::TableDockWidget(const QString& title, QWidget *parent, Qt::WindowFlags flags)
     : DockWidget(title, parent, flags)
 {
@@ -47,11 +109,16 @@ TableDockWidget::TableDockWidget(const QString& title, QWidget *parent, Qt::Wind
     model_ = new QStandardItemModel();
     InitializeTableView(view_, model_);
     layout_->addWidget(view_);
+    layout_->setAlignment(Qt::AlignTop);
     for (size_t i = 0; i < brainco_views_.size(); ++i) {
         brainco_labels_[i] = new QLabel(QStringLiteral("区域 %1").arg(i + 1U));
+        brainco_labels_[i]->setContentsMargins(0, i == 0 ? 0 : 4, 0, 0);
         brainco_views_[i] = new QTableView();
         brainco_models_[i] = new QStandardItemModel();
         InitializeTableView(brainco_views_[i], brainco_models_[i]);
+        brainco_views_[i]->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        brainco_views_[i]->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        brainco_views_[i]->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         brainco_labels_[i]->setVisible(false);
         brainco_views_[i]->setVisible(false);
         layout_->addWidget(brainco_labels_[i]);
@@ -86,10 +153,19 @@ void TableDockWidget::product_model_changed(uint8_t idx)
     product_type = static_cast<ProductModel>(idx);
     const bool brainco = product_type == ProductModel::BRAINCO_GLOVE_V2;
     view_->setVisible(!brainco);
-    if (!brainco) {
+    if (brainco) {
+        view_->setFixedHeight(0);
+        view_->setMaximumHeight(0);
+    }
+    else {
+        view_->setMinimumHeight(0);
+        view_->setMaximumHeight(QWIDGETSIZE_MAX);
+        view_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
         for (size_t i = 0; i < brainco_views_.size(); ++i) {
             brainco_labels_[i]->setVisible(false);
             brainco_views_[i]->setVisible(false);
+            brainco_labels_[i]->setMaximumHeight(QWIDGETSIZE_MAX);
+            brainco_views_[i]->setFixedHeight(0);
         }
     }
 }
@@ -101,7 +177,8 @@ void TableDockWidget::setColormap(const cmap::colormap_t cmap)
     cmap_ = cmap;
 }
 
-bool TableDockWidget::appendDisplayedAdCsv(const QString& file_path, double pressure_kpa, QString* error)
+bool TableDockWidget::appendDisplayedAdCsv(const QString& file_path, AdTableValueKind kind, double value,
+                                           QString* error)
 {
     std::scoped_lock lock(mtx_);
     if (data_.rows <= 0 || data_.cols <= 0) {
@@ -126,27 +203,34 @@ bool TableDockWidget::appendDisplayedAdCsv(const QString& file_path, double pres
     out.setEncoding(QStringConverter::Utf8);
     if (new_file) out << QChar(0xFEFF);
 
-    out << QStringLiteral("压强(KPa),") << QString::number(pressure_kpa, 'f', 2) << '\n';
-    out << '\n';
-    out << QStringLiteral("行\\列");
-    for (int col = 0; col < data_.cols; ++col) out << ',' << col;
+    const QString value_key = kind == AdTableValueKind::WeightGram ? QStringLiteral("砝码重量(g)")
+                                                                   : QStringLiteral("压强(KPa)");
+    out << value_key << ',' << QString::number(value, 'f', 2) << '\n';
     out << '\n';
 
-    for (int row = 0; row < data_.rows; ++row) {
-        out << row;
-        for (int col = 0; col < data_.cols; ++col) {
-            out << ',';
-            bool valid = true;
-            if (product_type == ProductModel::BRAINCO_GLOVE_V2 &&
-                Utils::is_brainco_csv_template_size(data_.rows, data_.cols, data_id_)) {
-                valid = Utils::is_valid_cell_by_brainco_csv(row, col, data_id_);
-            }
-            else if (Utils::is_csv_template_size(data_.rows, data_.cols, data_id_)) {
-                valid = Utils::is_valid_cell_by_csv(row, col, data_id_);
-            }
-            if (valid) out << data_(row, col);
+    const bool brainco = product_type == ProductModel::BRAINCO_GLOVE_V2 &&
+                         Utils::is_brainco_csv_template_size(data_.rows, data_.cols, data_id_);
+    if (brainco) {
+        const int part = static_cast<int>((data_id_ >> 4U) & 0x0FU);
+        std::array<BrainCoRegionSlice, 3> slices{};
+        const int region_count = braincoRegionSlicesForPart(part, &slices);
+        if (region_count <= 0) {
+            if (error) *error = QStringLiteral("当前部位区域配置无效，无法分区域写表");
+            return false;
         }
-        out << '\n';
+        for (int region = 0; region < region_count; ++region) {
+            const BrainCoRegionSlice slice = slices[region];
+            if (slice.rows <= 0) continue;
+            out << QStringLiteral("区域 %1（%2）")
+                       .arg(region + 1)
+                       .arg(QString::fromUtf8(slice.name))
+                << '\n';
+            writeAdMatrixCsvBlock(out, data_, slice.start, slice.rows, data_id_, product_type);
+            if (region + 1 < region_count) out << '\n';
+        }
+    }
+    else {
+        writeAdMatrixCsvBlock(out, data_, 0, data_.rows, data_id_, product_type);
     }
     out << '\n';
     return true;
@@ -223,36 +307,28 @@ void TableDockWidget::renderBrainCoRegions()
     std::scoped_lock lock(mtx_);
     if (data_.rows <= 0 || data_.cols <= 0) return;
 
-    struct Slice { int start; int rows; const char *name; };
-    std::array<Slice, 3> slices{};
-    int count = 0;
+    std::array<BrainCoRegionSlice, 3> slices{};
     const int part = static_cast<int>((data_id_ >> 4U) & 0x0FU);
-    if (part == 1) {
-        slices = { Slice{ 0, 8, "指尖" }, Slice{ 8, 3, "指根" }, Slice{} };
-        count = 2;
-    }
-    else if (part >= 2 && part <= 4) {
-        slices = { Slice{ 0, 7, "指尖" }, Slice{ 7, 2, "指中" }, Slice{ 9, 2, "指根" } };
-        count = 3;
-    }
-    else if (part == 5) {
-        slices = { Slice{ 0, 6, "指尖" }, Slice{ 6, 1, "指中" }, Slice{ 7, 2, "指根" } };
-        count = 3;
-    }
+    const int count = braincoRegionSlicesForPart(part, &slices);
     for (int region = 0; region < static_cast<int>(brainco_views_.size()); ++region) {
         const bool visible = region < count;
         brainco_labels_[region]->setVisible(visible);
         brainco_views_[region]->setVisible(visible);
-        if (!visible) continue;
-        const Slice slice = slices[region];
+        if (!visible) {
+            brainco_labels_[region]->setMaximumHeight(0);
+            brainco_views_[region]->setFixedHeight(0);
+            continue;
+        }
+        brainco_labels_[region]->setMaximumHeight(QWIDGETSIZE_MAX);
+        const BrainCoRegionSlice slice = slices[region];
         brainco_labels_[region]->setText(
             QStringLiteral("区域 %1（%2）").arg(region + 1).arg(QString::fromUtf8(slice.name)));
-        brainco_views_[region]->setFixedHeight(35 + slice.rows * 30);
         touch::matrix<uint16_t> region_data(slice.rows, data_.cols, uint16_t{});
         for (int row = 0; row < slice.rows; ++row)
             for (int col = 0; col < data_.cols; ++col)
                 region_data(row, col) = data_(slice.start + row, col);
         renderBrainCoRegion(brainco_models_[region], region_data, slice.start, data_id_);
+        FitBrainCoTableHeight(brainco_views_[region], slice.rows);
     }
 }
 

@@ -8,6 +8,9 @@
 #include <libtouch/matrix.h>
 #include <array>
 #include <shared_mutex>
+
+enum class AdTableValueKind { PressureKpa, WeightGram };
+
 class QStandardItemModel;
 class QTableView;
 class Menu;
@@ -23,8 +26,9 @@ public:
 
     void setData(uint32_t id, const touch::matrix<uint16_t>& m);
 
-    // 把当前表格正在显示的 AD 值追加写入 CSV。文件不存在则创建，已存在则续写。
-    bool appendDisplayedAdCsv(const QString& file_path, double pressure_kpa, QString* error);
+    // 把当前表格正在显示的 AD 值追加写入 CSV。强脑型号按区域（指尖/指中/指根）分块写入。
+    bool appendDisplayedAdCsv(const QString& file_path, AdTableValueKind kind, double value,
+                              QString* error = nullptr);
 
     void setDataRange(int, int max);
 
