@@ -381,6 +381,10 @@ QWidget *SensorWidget::create_calibration_test_group(QWidget *parent)
                                                      Qt::TextSelectableByKeyboard);
     send_button_                 = new QPushButton("标定传感器", group);
     re_calibration_button_       = new QPushButton("重新标定", group);
+    erase_region_button_         = new QPushButton("擦除区域", group);
+    erase_region_button_->setVisible(false);
+    erase_region_button_->setToolTip(
+        QStringLiteral("擦除当前「采集部位 + 上传区域」在设备中的 LUT，并删除该区域采集 CSV"));
     test_button_                 = new QPushButton("测试", group);
     save_test_result_button_     = new QPushButton("切换测试区域", group);
 
@@ -480,6 +484,7 @@ QWidget *SensorWidget::create_calibration_test_group(QWidget *parent)
 
     layout->addWidget(send_button_, 3, 1);
     layout->addWidget(re_calibration_button_, 3, 2);
+    layout->addWidget(erase_region_button_, 3, 3);
 
     collected_points_title_ = new QLabel("已采集点位：", group);
     layout->addWidget(collected_points_title_, 4, 0);
@@ -575,14 +580,24 @@ void SensorWidget::init_connections()
             [this]() { switch_collect_part_to_next(); });
 
     connect(collect_part_spinbox_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
-        // 关键修复：部位 ID 必须以本次触发的 value 为准，不能在循环/异步回调中复用最后一个值。
-        // set_collect_part_id() 会同步 UI 部位 ID 与真实协议 ID：0x11/0x21/.../0x61。
+        if (product_type_ == ProductModel::BRAINCO_GLOVE_V2) {
+            const int finger_base = (value & 0xF0) | 0x01;
+            const int region =
+                std::clamp(value & 0x0F, 1, max_collect_region_for_part(finger_base));
+            if (collect_part_id_ != finger_base || collect_region_id_ != region) {
+                set_collect_part_id(finger_base, false);
+                set_collect_region_id(region, true);
+            }
+            else {
+                emit choose_id(static_cast<uint8_t>(collect_part_protocol_id_));
+            }
+            return;
+        }
         set_collect_part_id(value, true);
     });
 
     connect(collect_region_spinbox_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
-        // MCU continuously reports all five fingers; region selection only changes the host-side view.
-        set_collect_region_id(value, false);
+        set_collect_region_id(value, true);
     });
 
     connect(collect_area_spinbox_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
@@ -611,28 +626,89 @@ void SensorWidget::init_connections()
 
     connect(re_calibration_button_, &QPushButton::clicked, this, [this]() {
         if (product_type_ == ProductModel::BRAINCO_GLOVE_V2) {
-            // 强脑："重新标定"擦除 MCU 中全部 14 个区域的 LUT。本地采集 CSV 不删除，
-            // 之后点"标定传感器"即可按已有采集数据逐区域重新下发。
             const auto answer = QMessageBox::question(
                 this, QStringLiteral("重新标定"),
-                QStringLiteral("将擦除设备中全部 14 个区域的标定 LUT，擦除后设备上传原始 AD。\n"
-                               "本地采集 CSV 会保留，之后点“标定传感器”可重新下发。\n\n确定继续？"));
+                QStringLiteral("将擦除设备中全部 14 个区域的标定 LUT，并删除保存路径下本序列号"
+                               "的全部采集 CSV（lut_<SN>_*.csv）。\n"
+                               "擦除后设备上传原始 AD，需重新采集后再标定。\n\n确定继续？"));
             if (answer != QMessageBox::Yes) return;
+            const int removed = remove_all_calibration_csv_for_current_sn();
+            pending_collect_samples_.clear();
+            reset_pressure_to_default();
+            reset_test_pressure_sequence();
+            update_collected_points_ui();
             emit set_device_active_query(false);
             emit re_calibration_requested(0U);
             emit set_device_active_query(true);
-            showToast(QStringLiteral("已请求擦除全部 14 个区域的标定 LUT（本地采集 CSV 已保留），结果见区域状态"));
+            showToast(QStringLiteral("已擦除设备 14 区 LUT，并删除 %1 个采集 CSV").arg(removed));
             return;
         }
-        // 其它产品："重新标定"只擦除当前选择部位的 LUT，不影响其它部位。
         bind_device_to_collect_part_id();
         const uint8_t wire_part = static_cast<uint8_t>((collect_part_protocol_id_ >> 4) & 0x0f);
-        emit          set_device_active_query(false);
-        emit          re_calibration_requested(wire_part);
-        emit          set_device_active_query(true);
-        showToast(QStringLiteral("已请求擦除部位 0x%1 的标定 LUT")
+        const auto answer = QMessageBox::question(
+            this, QStringLiteral("重新标定"),
+            QStringLiteral("将擦除部位 0x%1 在设备中的标定 LUT，并删除该部位下全部采集 CSV。\n\n确定继续？")
+                .arg(collect_part_protocol_id_, 2, 16, QLatin1Char('0'))
+                .toUpper());
+        if (answer != QMessageBox::Yes) return;
+        const int removed =
+            remove_calibration_csv_files(calibration_csv_paths_for_part_id(collect_part_id_));
+        pending_collect_samples_.clear();
+        reset_pressure_to_default();
+        reset_test_pressure_sequence();
+        update_collected_points_ui();
+        emit set_device_active_query(false);
+        emit re_calibration_requested(wire_part);
+        emit set_device_active_query(true);
+        showToast(QStringLiteral("已擦除部位 0x%1 的 LUT，并删除 %2 个采集 CSV")
                       .arg(collect_part_protocol_id_, 2, 16, QLatin1Char('0'))
+                      .arg(removed)
                       .toUpper());
+    });
+
+    connect(erase_region_button_, &QPushButton::clicked, this, [this]() {
+        if (product_type_ != ProductModel::BRAINCO_GLOVE_V2) return;
+        bind_device_to_collect_part_id();
+        const uint8_t wire_part  = static_cast<uint8_t>((collect_part_id_ >> 4) & 0x0f);
+        const uint8_t region_id = static_cast<uint8_t>(collect_region_id_);
+        const QStringList region_names{ QStringLiteral("指尖"), QStringLiteral("指中"),
+                                        QStringLiteral("指根") };
+        QString region_name;
+        if ((collect_part_id_ >> 4) == 1)
+            region_name = region_id == 1 ? QStringLiteral("指尖") : QStringLiteral("指根");
+        else if (region_id >= 1 && region_id <= region_names.size())
+            region_name = region_names.at(region_id - 1);
+        else
+            region_name = QStringLiteral("区域%1").arg(region_id);
+
+        const QString csv_path = current_calibration_csv_path();
+        const auto answer = QMessageBox::question(
+            this, QStringLiteral("擦除区域"),
+            QStringLiteral("将擦除手指 Endpoint=%1、区域 %2（%3）在设备中的标定 LUT，\n"
+                           "并删除当前区域的采集 CSV：\n%4\n\n确定继续？")
+                .arg(wire_part)
+                .arg(region_id)
+                .arg(region_name)
+                .arg(csv_path));
+        if (answer != QMessageBox::Yes) return;
+
+        QString csv_error;
+        if (!remove_current_region_calibration_csv(&csv_error)) {
+            QMessageBox::warning(this, QStringLiteral("擦除区域"),
+                                 csv_error.isEmpty() ? QStringLiteral("删除采集 CSV 失败") : csv_error);
+            return;
+        }
+        pending_collect_samples_.clear();
+        reset_pressure_to_default();
+        update_collected_points_ui();
+
+        emit set_device_active_query(false);
+        emit erase_calibration_region_requested(wire_part, region_id);
+        emit set_device_active_query(true);
+        showToast(QStringLiteral("已擦除 Endpoint %1 区域 %2（%3），并删除该区域采集 CSV")
+                      .arg(wire_part)
+                      .arg(region_id)
+                      .arg(region_name));
     });
 }
 
@@ -804,17 +880,61 @@ void SensorWidget::product_model_changed(uint8_t idx)
         collected_points_title_->setText(brainco ? QStringLiteral("采集状态：") : QStringLiteral("已采集点位："));
     if (brainco && collect_area_spinbox_ && collect_area_spinbox_->value() != 1)
         collect_area_spinbox_->setValue(1);
-    if (collect_part_spinbox_) collect_part_spinbox_->setMaximum(brainco ? 0x51 : 0x61);
+    if (collect_part_spinbox_) {
+        if (brainco) {
+            collect_part_spinbox_->setSingleStep(1);
+        }
+        else {
+            collect_part_spinbox_->setRange(0x11, 0x61);
+            collect_part_spinbox_->setSingleStep(0x10);
+            collect_part_spinbox_->setMaximum(0x61);
+        }
+    }
     if (collect_region_spinbox_) collect_region_spinbox_->setEnabled(brainco);
     // 强脑固件已支持 STATUS_ALL 查询 14 个区域和按区域 ERASE，两个按钮对所有型号都可用。
     if (calibration_query_button_) calibration_query_button_->setEnabled(true);
     if (re_calibration_button_) re_calibration_button_->setEnabled(true);
     if (region_status_title_) region_status_title_->setVisible(brainco);
+    if (erase_region_button_) erase_region_button_->setVisible(brainco);
     if (region_status_host_) region_status_host_->setVisible(brainco);
     if (brainco && collect_part_id_ > 0x51) set_collect_part_id(0x51, false);
     set_collect_region_id(brainco ? collect_region_id_ : 1, false);
+    syncCollectEditorFieldsFromState();
     logi("Product model changed: {} ({})", static_cast<int>(idx),
          productModelToString(product_type_).toStdString());
+}
+
+void SensorWidget::syncCollectEditorFieldsFromState()
+{
+    const bool brainco = product_type_ == ProductModel::BRAINCO_GLOVE_V2;
+    if (collect_part_spinbox_) {
+        collect_part_spinbox_->blockSignals(true);
+        if (brainco) {
+            const int finger_base = collect_part_id_ & 0xF0;
+            const int region_min  = finger_base | 0x01;
+            const int region_max  = finger_base | max_collect_region_for_part(collect_part_id_);
+            collect_part_spinbox_->setRange(region_min, region_max);
+            collect_part_spinbox_->setSingleStep(1);
+            collect_part_spinbox_->setValue(collect_part_protocol_id_);
+        }
+        else {
+            collect_part_spinbox_->setRange(0x11, 0x61);
+            collect_part_spinbox_->setSingleStep(0x10);
+            collect_part_spinbox_->setValue(collect_part_id_);
+        }
+        collect_part_spinbox_->blockSignals(false);
+    }
+    if (collect_region_spinbox_) {
+        collect_region_spinbox_->blockSignals(true);
+        collect_region_spinbox_->setRange(1, max_collect_region_for_part(collect_part_id_));
+        collect_region_spinbox_->setValue(collect_region_id_);
+        collect_region_spinbox_->blockSignals(false);
+    }
+    if (collect_area_spinbox_ && !brainco) {
+        collect_area_spinbox_->blockSignals(true);
+        collect_area_spinbox_->setValue(collect_area_index_);
+        collect_area_spinbox_->blockSignals(false);
+    }
 }
 
 void SensorWidget::reset_region_status_cells()
@@ -1224,17 +1344,7 @@ void SensorWidget::set_collect_part_id(int part_id, bool emit_switch_device)
         set_calibration_status_ui(app::CalibrationStatus::Unknown);
     }
 
-    if (collect_part_spinbox_ && collect_part_spinbox_->value() != normalized_part_id) {
-        collect_part_spinbox_->blockSignals(true);
-        collect_part_spinbox_->setValue(normalized_part_id);
-        collect_part_spinbox_->blockSignals(false);
-    }
-    if (collect_region_spinbox_) {
-        collect_region_spinbox_->blockSignals(true);
-        collect_region_spinbox_->setRange(1, max_collect_region_for_part(normalized_part_id));
-        collect_region_spinbox_->setValue(collect_region_id_);
-        collect_region_spinbox_->blockSignals(false);
-    }
+    syncCollectEditorFieldsFromState();
 
     if (sensor_choose_id_spinbox_) {
         sensor_choose_id_spinbox_->blockSignals(true);
@@ -1291,11 +1401,7 @@ void SensorWidget::set_collect_region_id(int region_id, bool emit_switch_device)
     collect_part_protocol_id_ = product_type_ == ProductModel::BRAINCO_GLOVE_V2
                                     ? next_protocol_id
                                     : normalizeCollectPartId(collect_part_id_);
-    if (collect_region_spinbox_ && collect_region_spinbox_->value() != bounded) {
-        collect_region_spinbox_->blockSignals(true);
-        collect_region_spinbox_->setValue(bounded);
-        collect_region_spinbox_->blockSignals(false);
-    }
+    syncCollectEditorFieldsFromState();
     if (changed) {
         test_records_by_part_[previous_protocol_id] = test_records_;
         test_records_ = test_records_by_part_[collect_part_protocol_id_];
@@ -1512,6 +1618,53 @@ void SensorWidget::check_current_point_duplicate_hint()
             "Current collect point duplicate hint: current_point={}, duplicate_point={}, cx={:.6f}, cy={:.6f}",
             collect_area_index_, duplicate_point, sample.cx, sample.cy);
     }
+}
+
+QStringList SensorWidget::all_calibration_csv_paths_for_current_sn() const
+{
+    QString sn = current_sn_.trimmed();
+    if (sn.isEmpty() || sn == QStringLiteral("null")) sn = QStringLiteral("NO_SN");
+
+    QDir dir(current_save_path_);
+    QStringList paths;
+    const QStringList files =
+        dir.entryList(QStringList() << QStringLiteral("lut_%1_*.csv").arg(sn), QDir::Files, QDir::Name);
+    for (const QString& file : files) paths << dir.filePath(file);
+    paths.removeDuplicates();
+    return paths;
+}
+
+int SensorWidget::remove_calibration_csv_files(const QStringList& paths)
+{
+    int removed = 0;
+    for (const QString& path : paths) {
+        if (!QFileInfo::exists(path)) continue;
+        if (QFile::remove(path)) {
+            ++removed;
+            logi("Calibration CSV removed: {}", path.toStdString());
+        }
+        else {
+            logw("Calibration CSV remove failed: {}", path.toStdString());
+        }
+    }
+    return removed;
+}
+
+int SensorWidget::remove_all_calibration_csv_for_current_sn()
+{
+    return remove_calibration_csv_files(all_calibration_csv_paths_for_current_sn());
+}
+
+bool SensorWidget::remove_current_region_calibration_csv(QString* error)
+{
+    const QString file_path = current_calibration_csv_path();
+    if (!QFileInfo::exists(file_path)) return true;
+    if (!QFile::remove(file_path)) {
+        if (error) *error = QStringLiteral("无法删除采集文件：%1").arg(file_path);
+        return false;
+    }
+    logi("Erase region: removed calibration CSV {}", file_path.toStdString());
+    return true;
 }
 
 QStringList SensorWidget::calibration_csv_paths_for_part_id(int part_id) const
@@ -1878,7 +2031,11 @@ void SensorWidget::switch_collect_area_to_next()
 {
     if (product_type_ == ProductModel::BRAINCO_GLOVE_V2) {
         const int next = collect_region_id_ % max_collect_region_for_part(collect_part_id_) + 1;
-        set_collect_region_id(next, false);
+        set_collect_region_id(next, true);
+        showToast(QStringLiteral("已切换上传区域 %1，设备ID 0x%2")
+                      .arg(next)
+                      .arg(collect_part_protocol_id_, 2, 16, QLatin1Char('0'))
+                      .toUpper());
         return;
     }
     const int current = collect_area_spinbox_ ? collect_area_spinbox_->value() : collect_area_index_;
@@ -1898,12 +2055,8 @@ void SensorWidget::switch_collect_area_to_next()
     }
 
     collect_area_index_ = current + 1;
-    if (collect_area_spinbox_) {
-        collect_area_spinbox_->setValue(collect_area_index_);
-    }
-    else {
-        sync_collect_area_from_ui();
-    }
+    syncCollectEditorFieldsFromState();
+    sync_collect_area_from_ui();
 }
 
 void SensorWidget::reset_current_collect_point()

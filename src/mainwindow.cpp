@@ -261,7 +261,7 @@ void MainWindow::init_sensor_connection()
                 }
                 if (productModelFromId(static_cast<uint8_t>(device_type_)) == ProductModel::BRAINCO_GLOVE_V2) {
                     // 强脑：逐根手指整指擦除（ERASE DataLength=0），5 根手指共 14 个区域全部清除。
-                    // 只擦 MCU 中的 LUT，本地采集 CSV 不动，之后点"标定传感器"可重新下发。
+                    // 本地采集 CSV 已在 SensorWidget「重新标定」确认后删除。
                     for (uint8_t finger = 1; finger <= 5; ++finger) {
                         const auto erased = device_->erase_calibration_lut(finger, 0U);
                         if (!erased.success) {
@@ -280,6 +280,36 @@ void MainWindow::init_sensor_connection()
                 sensor_window_->set_part_calibration_status(part_id, 1U, result.success, result.status,
                                                             result.expected_points, result.mode, result.crc32,
                                                             result.version, result.error);
+            });
+
+    connect(sensor_window_, &SensorWidget::erase_calibration_region_requested, this,
+            [=](uint8_t part_id, uint8_t region_id) {
+                if (!device_) {
+                    logw("擦除区域失败：设备未连接");
+                    Message::warning(this, QStringLiteral("设备未连接，擦除指令未发送"));
+                    return;
+                }
+                const auto result = device_->erase_calibration_lut(part_id, region_id);
+                logi("标定擦除：part={}, region={}, success={}, status=0x{:02X}", part_id, region_id,
+                     result.success, result.status);
+                if (!result.success) {
+                    Message::error(this, QStringLiteral("擦除区域失败：%1")
+                                              .arg(result.error.isEmpty() ? QStringLiteral("设备返回错误")
+                                                                          : result.error));
+                }
+                else {
+                    Message::success(
+                        this, QStringLiteral("已擦除 Endpoint %1 区域 %2 的标定 LUT").arg(part_id).arg(region_id));
+                }
+                if (productModelFromId(static_cast<uint8_t>(device_type_)) ==
+                    ProductModel::BRAINCO_GLOVE_V2) {
+                    sensor_window_->set_region_mask_status(device_->query_calibration_all());
+                }
+                else {
+                    sensor_window_->set_part_calibration_status(
+                        part_id, region_id, result.success, result.status, result.expected_points,
+                        result.mode, result.crc32, result.version, result.error);
+                }
             });
 
     connect(sensor_window_, &SensorWidget::send_calibration_curve_float, this,

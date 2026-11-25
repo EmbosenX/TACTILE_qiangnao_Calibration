@@ -55,9 +55,10 @@ signals:
     void modify_address_requested(uint8_t id);
     // 模拟标定时将生成好的 LUT 分包下发到设备端。
     void send_calibration_curve_float(QVector<float> data, int package_id);
-    // 重新标定：擦除标定表。强脑固定擦除全部 14 个区域（part_id 忽略）；
-    // 其它产品擦除 part_id 指定的整个部位。本地采集 CSV 均保留。
+    // 重新标定：擦设备 LUT，并删除对应范围的本地采集 CSV。强脑为全部 14 区域相关文件。
     void re_calibration_requested(uint8_t part_id);
+    // 只擦除指定手指的单个区域（ERASE Scope=0x01）。part_id 为 Endpoint 1~5，region_id 为 1~3。
+    void erase_calibration_region_requested(uint8_t part_id, uint8_t region_id);
     // 标定 LUT 分包下发期间暂停/恢复设备主动查询。
     void set_device_active_query(bool enabled);
     void download_calibration_lut(uint8_t part_id, QVector<float> adc, QVector<float> force_cn,
@@ -126,10 +127,15 @@ private:
     void               set_collect_region_id(int region_id, bool emit_switch_device = true);
     int                max_collect_region_for_part(int part_id) const;
     void               bind_device_to_collect_part_id();
+    void               syncCollectEditorFieldsFromState();
     void               sync_collect_part_from_ui();
     void               switch_collect_part_to_next();
     bool ensure_calibration_csv_file(const QString& file_path, QString *error_message = nullptr) const;
     bool calibration_csv_has_data_rows(const QString& file_path) const;
+    QStringList        all_calibration_csv_paths_for_current_sn() const;
+    int                remove_calibration_csv_files(const QStringList& paths);
+    int                remove_all_calibration_csv_for_current_sn();
+    bool               remove_current_region_calibration_csv(QString* error = nullptr);
     bool read_centroid_from_csv(const QString& file_path, double *cx, double *cy) const;
     int  find_duplicate_collected_point(double cx, double cy, int ignore_point = -1) const;
     void check_current_point_duplicate_hint();
@@ -191,6 +197,7 @@ private:
     QLabel         *collected_points_label_      = nullptr;
     QPushButton    *send_button_                 = nullptr;
     QPushButton    *re_calibration_button_       = nullptr;
+    QPushButton    *erase_region_button_         = nullptr;
     QPushButton    *test_button_                 = nullptr;
     QPushButton    *save_test_result_button_     = nullptr;
     QLabel         *test_result_label_           = nullptr;
