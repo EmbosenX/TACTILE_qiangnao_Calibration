@@ -59,6 +59,8 @@ signals:
     void re_calibration_requested(uint8_t part_id);
     // 只擦除指定手指的单个区域（ERASE Scope=0x01）。part_id 为 Endpoint 1~5，region_id 为 1~3。
     void erase_calibration_region_requested(uint8_t part_id, uint8_t region_id);
+    // 擦除整根手指（该 Endpoint 下全部区域，region_id=0）。part_id 为 Endpoint 1~5。
+    void erase_calibration_part_requested(uint8_t part_id);
     // 标定 LUT 分包下发期间暂停/恢复设备主动查询。
     void set_device_active_query(bool enabled);
     void download_calibration_lut(uint8_t part_id, QVector<float> adc, QVector<float> force_cn,
@@ -135,6 +137,7 @@ private:
     QStringList        all_calibration_csv_paths_for_current_sn() const;
     int                remove_calibration_csv_files(const QStringList& paths);
     int                remove_all_calibration_csv_for_current_sn();
+    int                remove_calibration_csv_for_current_part();
     bool               remove_current_region_calibration_csv(QString* error = nullptr);
     bool read_centroid_from_csv(const QString& file_path, double *cx, double *cy) const;
     int  find_duplicate_collected_point(double cx, double cy, int ignore_point = -1) const;
@@ -198,6 +201,7 @@ private:
     QPushButton    *send_button_                 = nullptr;
     QPushButton    *re_calibration_button_       = nullptr;
     QPushButton    *erase_region_button_         = nullptr;
+    QPushButton    *erase_part_button_           = nullptr;
     QPushButton    *test_button_                 = nullptr;
     QPushButton    *save_test_result_button_     = nullptr;
     QLabel         *test_result_label_           = nullptr;

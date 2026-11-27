@@ -312,6 +312,35 @@ void MainWindow::init_sensor_connection()
                 }
             });
 
+    connect(sensor_window_, &SensorWidget::erase_calibration_part_requested, this,
+            [=](uint8_t part_id) {
+                if (!device_) {
+                    logw("擦除部位失败：设备未连接");
+                    Message::warning(this, QStringLiteral("设备未连接，擦除指令未发送"));
+                    return;
+                }
+                const auto result = device_->erase_calibration_lut(part_id, 0U);
+                logi("标定擦除：part={}（整指）, success={}, status=0x{:02X}", part_id, result.success,
+                     result.status);
+                if (!result.success) {
+                    Message::error(this, QStringLiteral("擦除部位失败：%1")
+                                              .arg(result.error.isEmpty() ? QStringLiteral("设备返回错误")
+                                                                          : result.error));
+                }
+                else {
+                    Message::success(this, QStringLiteral("已擦除 Endpoint %1（整指）的标定 LUT").arg(part_id));
+                }
+                if (productModelFromId(static_cast<uint8_t>(device_type_)) ==
+                    ProductModel::BRAINCO_GLOVE_V2) {
+                    sensor_window_->set_region_mask_status(device_->query_calibration_all());
+                }
+                else {
+                    sensor_window_->set_part_calibration_status(
+                        part_id, 0U, result.success, result.status, result.expected_points,
+                        result.mode, result.crc32, result.version, result.error);
+                }
+            });
+
     connect(sensor_window_, &SensorWidget::send_calibration_curve_float, this,
             [=](QVector<float> data, int package_id) {
                 if (!device_) {

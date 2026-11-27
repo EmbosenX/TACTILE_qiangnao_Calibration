@@ -385,6 +385,10 @@ QWidget *SensorWidget::create_calibration_test_group(QWidget *parent)
     erase_region_button_->setVisible(false);
     erase_region_button_->setToolTip(
         QStringLiteral("擦除当前「采集部位 + 上传区域」在设备中的 LUT，并删除该区域采集 CSV"));
+    erase_part_button_ = new QPushButton("擦除部位", group);
+    erase_part_button_->setVisible(false);
+    erase_part_button_->setToolTip(
+        QStringLiteral("擦除当前手指在设备中的全部区域 LUT，并删除该手指下全部采集 CSV"));
     test_button_                 = new QPushButton("测试", group);
     save_test_result_button_     = new QPushButton("切换测试区域", group);
 
@@ -485,6 +489,7 @@ QWidget *SensorWidget::create_calibration_test_group(QWidget *parent)
     layout->addWidget(send_button_, 3, 1);
     layout->addWidget(re_calibration_button_, 3, 2);
     layout->addWidget(erase_region_button_, 3, 3);
+    layout->addWidget(erase_part_button_, 3, 4);
 
     collected_points_title_ = new QLabel("已采集点位：", group);
     layout->addWidget(collected_points_title_, 4, 0);
@@ -710,6 +715,38 @@ void SensorWidget::init_connections()
                       .arg(region_id)
                       .arg(region_name));
     });
+
+    connect(erase_part_button_, &QPushButton::clicked, this, [this]() {
+        if (product_type_ != ProductModel::BRAINCO_GLOVE_V2) return;
+        bind_device_to_collect_part_id();
+        const uint8_t wire_part = static_cast<uint8_t>((collect_part_id_ >> 4) & 0x0f);
+        static const QStringList finger_names{ QString(),     QStringLiteral("拇指"),
+                                               QStringLiteral("食指"), QStringLiteral("中指"),
+                                               QStringLiteral("无名指"), QStringLiteral("小指") };
+        const QString finger_name =
+            wire_part >= 1 && wire_part < finger_names.size() ? finger_names.at(wire_part)
+                                                              : QStringLiteral("手指%1").arg(wire_part);
+        const int region_count = max_collect_region_for_part(collect_part_id_);
+        const auto answer = QMessageBox::question(
+            this, QStringLiteral("擦除部位"),
+            QStringLiteral("将擦除 %1（Endpoint=%2）在设备中的全部 %3 个区域标定 LUT，\n"
+                           "并删除该手指下全部采集 CSV。\n"
+                           "其它手指不受影响。\n\n确定继续？")
+                .arg(finger_name)
+                .arg(wire_part)
+                .arg(region_count));
+        if (answer != QMessageBox::Yes) return;
+
+        const int removed = remove_calibration_csv_for_current_part();
+        pending_collect_samples_.clear();
+        reset_pressure_to_default();
+        update_collected_points_ui();
+
+        emit set_device_active_query(false);
+        emit erase_calibration_part_requested(wire_part);
+        emit set_device_active_query(true);
+        showToast(QStringLiteral("已擦除 %1 的 LUT，并删除 %2 个采集 CSV").arg(finger_name).arg(removed));
+    });
 }
 
 void SensorWidget::setData(uint32_t id, const touch::matrix<uint16_t>& m)
@@ -896,6 +933,7 @@ void SensorWidget::product_model_changed(uint8_t idx)
     if (re_calibration_button_) re_calibration_button_->setEnabled(true);
     if (region_status_title_) region_status_title_->setVisible(brainco);
     if (erase_region_button_) erase_region_button_->setVisible(brainco);
+    if (erase_part_button_) erase_part_button_->setVisible(brainco);
     if (region_status_host_) region_status_host_->setVisible(brainco);
     if (brainco && collect_part_id_ > 0x51) set_collect_part_id(0x51, false);
     set_collect_region_id(brainco ? collect_region_id_ : 1, false);
@@ -1653,6 +1691,11 @@ int SensorWidget::remove_calibration_csv_files(const QStringList& paths)
 int SensorWidget::remove_all_calibration_csv_for_current_sn()
 {
     return remove_calibration_csv_files(all_calibration_csv_paths_for_current_sn());
+}
+
+int SensorWidget::remove_calibration_csv_for_current_part()
+{
+    return remove_calibration_csv_files(brainco_calibration_csv_paths_for_part(collect_part_id_));
 }
 
 bool SensorWidget::remove_current_region_calibration_csv(QString* error)
